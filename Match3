@@ -1,0 +1,456 @@
+<!doctype html>
+
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Match‑3 Lite</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background:#0f172a; color:#e2e8f0; }
+    .wrap { display:flex; align-items:center; justify-content:center; min-height:100%; gap:24px; flex-wrap:wrap; padding:16px; }
+    canvas { background:#111827; border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+    .ui { display:flex; flex-direction:column; gap:12px; }
+    .card { background:#111827; padding:16px; border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.3); min-width: 260px; }
+    .btn { appearance:none; border:0; padding:10px 14px; border-radius:12px; font-weight:700; cursor:pointer; background:#22c55e; color:#0b111e; }
+    .btn.secondary { background:#94a3b8; }
+    .muted { color:#94a3b8; font-size:14px; }
+    .title { font-weight:800; font-size:20px; margin:0 0 6px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="game" width="480" height="640"></canvas>
+  <aside class="ui">
+    <div class="card">
+      <h1 class="title">Match‑3 Lite</h1>
+      <div>النقاط: <b id="score">0</b></div>
+      <div>الحركات: <b id="moves">30</b></div>
+      <div>المستوى: <b id="level">1</b></div>
+      <div class="muted">اسحب بلاطتين متجاورتين لمطابقة 3+ نفس اللون. طابق 4 لصاروخ، و5 لقنبلة.</div>
+    </div>
+    <div class="card">
+      <button class="btn" id="newGame">لعبة جديدة</button>
+      <button class="btn secondary" id="shuffle">خلط اللوح</button>
+      <p class="muted">هذه نسخة تعليمية بسيطة — غير من الألوان، الأصوات، والقواعد لتكون لعبتك مميزة.</p>
+    </div>
+  </aside>
+</div><script>
+// ================================
+// Match‑3 Lite — Canvas Version
+// كود تعليمي بسيط بميكانيك مختلف عن أي لعبة تجارية
+// ================================
+
+const W = 480, H = 640; // حجم اللوحة
+const COLS = 8, ROWS = 10; // شبكة 8x10 (مختلفة عن المعتاد 8x8)
+const TILE = 48; // حجم البلاطة بالبكسل
+const OFFSET_X = (W - COLS * TILE) / 2; // توسيط الشبكة
+const OFFSET_Y = 80; // مسافة من الأعلى لإظهار سقوط البلاط
+
+// لوحة الألوان (أشكال مميزة+ألوان لتجنب التشابه)
+const COLORS = [
+  {c:'#ef4444', s:'circle'},
+  {c:'#22c55e', s:'square'},
+  {c:'#3b82f6', s:'diamond'},
+  {c:'#eab308', s:'triangle'},
+  {c:'#a855f7', s:'hex'},
+  {c:'#f97316', s:'star'}
+];
+
+// الأنواع الخاصة
+const TYPE_NORMAL = 0;
+const TYPE_ROCKET = 1; // يصفي صف/عمود عند التفعيل
+const TYPE_BOMB   = 2; // ينفجر 3x3
+
+let canvas = document.getElementById('game');
+let ctx = canvas.getContext('2d');
+
+let grid = []; // مصفوفة البلاط
+let score = 0, moves = 30, level = 1;
+let selected = null; // البلاطة المحددة للسحب
+let anims = []; // مؤثرات بصرية بسيطة
+let inputLock = false;
+
+function randInt(n){ return Math.floor(Math.random()*n); }
+
+function tileAt(r,c){ if(r<0||c<0||r>=ROWS||c>=COLS) return null; return grid[r][c]; }
+
+function newTile() {
+  const t = {
+    color: randInt(COLORS.length),
+    type: TYPE_NORMAL,
+    bornY: -TILE // للسقوط من أعلى
+  };
+  return t;
+}
+
+function initGrid(){
+  grid = Array.from({length: ROWS}, ()=> Array.from({length: COLS}, newTile));
+  // ضمان عدم وجود تطابقات جاهزة عند البداية (اختياري)
+  removeInitialMatches();
+}
+
+function removeInitialMatches(){
+  let changed=true, safety=0;
+  while(changed && safety++<20){
+    changed=false;
+    const matches = findMatches();
+    if(matches.length){
+      changed=true;
+      for(const cell of matches){
+        grid[cell.r][cell.c] = newTile();
+      }
+    }
+  }
+}
+
+function drawTile(r,c,t, yOffset=0){
+  const x = OFFSET_X + c*TILE + TILE/2;
+  const y = OFFSET_Y + r*TILE + TILE/2 + yOffset;
+  const {c:color, s:shape} = COLORS[t.color];
+  ctx.save();
+  // ظل خفيف
+  ctx.shadowColor='rgba(0,0,0,.25)';
+  ctx.shadowBlur=6;
+
+  // خلفية البلاطة
+  ctx.fillStyle = '#0b1220';
+  roundRect(x - TILE/2+2, y - TILE/2+2, TILE-4, TILE-4, 10);
+  ctx.fill();
+
+  // الشكل
+  ctx.fillStyle = color;
+  ctx.strokeStyle = 'rgba(255,255,255,.2)';
+  ctx.lineWidth = 2;
+  drawShape(shape, x, y, TILE*0.32);
+  ctx.fill();
+  ctx.stroke();
+
+  if(t.type===TYPE_ROCKET){
+    // مؤشّر روكيت
+    ctx.fillStyle = 'rgba(255,255,255,.8)';
+    ctx.fillRect(x-6, y-18, 12, 36);
+  }
+  if(t.type===TYPE_BOMB){
+    ctx.beginPath();
+    ctx.arc(x, y, 8, 0, Math.PI*2);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.fillStyle = '#0b1220';
+    ctx.font='10px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('爆', x, y); // رمز صغير مميز
+  }
+  ctx.restore();
+}
+
+function drawShape(shape, x, y, s){
+  ctx.beginPath();
+  if(shape==='circle'){
+    ctx.arc(x, y, s, 0, Math.PI*2);
+  } else if(shape==='square'){
+    ctx.rect(x-s, y-s, s*2, s*2);
+  } else if(shape==='diamond'){
+    ctx.moveTo(x, y-s); ctx.lineTo(x+s, y); ctx.lineTo(x, y+s); ctx.lineTo(x-s, y); ctx.closePath();
+  } else if(shape==='triangle'){
+    ctx.moveTo(x, y-s); ctx.lineTo(x+s, y+s); ctx.lineTo(x-s, y+s); ctx.closePath();
+  } else if(shape==='hex'){
+    const a = Math.PI/3; ctx.moveTo(x+s, y);
+    for(let i=1;i<6;i++){ ctx.lineTo(x + s*Math.cos(a*i), y + s*Math.sin(a*i)); }
+    ctx.closePath();
+  } else if(shape==='star'){
+    for(let i=0;i<10;i++){
+      const ang = i*Math.PI/5;
+      const rad = i%2? s*0.4 : s;
+      const px = x + Math.cos(ang)*rad;
+      const py = y + Math.sin(ang)*rad;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.closePath();
+  }
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+  // عنوان أعلى بسيط
+  ctx.fillStyle = '#0b1220';
+  roundRect(12,12,W-24,56,16); ctx.fill();
+  ctx.fillStyle='#e2e8f0'; ctx.font='700 18px system-ui, sans-serif';
+  ctx.fillText('Match‑3 Lite — نموذج تعليمي', 24, 46);
+
+  // رسم الشبكة
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      drawTile(r,c,grid[r][c]);
+    }
+  }
+
+  // تمييز البلاطة المحددة
+  if(selected){
+    const {r,c} = selected;
+    ctx.strokeStyle = '#22c55e'; ctx.lineWidth=4;
+    ctx.strokeRect(OFFSET_X + c*TILE+4, OFFSET_Y + r*TILE+4, TILE-8, TILE-8);
+  }
+
+  // تشغيل وإزالة الأنميشنات
+  const now = performance.now();
+  anims = anims.filter(a=> now < a.t + a.d);
+  for(const a of anims){ a.draw(now); }
+
+  requestAnimationFrame(render);
+}
+
+function swap(a,b){
+  const tmp = grid[a.r][a.c];
+  grid[a.r][a.c] = grid[b.r][b.c];
+  grid[b.r][b.c] = tmp;
+}
+
+function areNeighbors(a,b){
+  return a && b && ((Math.abs(a.r-b.r)===1 && a.c===b.c) || (Math.abs(a.c-b.c)===1 && a.r===b.r));
+}
+
+function findMatches(){
+  const matches = [];
+  // أفقي
+  for(let r=0;r<ROWS;r++){
+    let run=1;
+    for(let c=1;c<=COLS;c++){
+      const cur = c<COLS? grid[r][c].color : -1;
+      const prev = grid[r][c-1].color;
+      if(c<COLS && cur===prev) run++; else {
+        if(run>=3){ for(let k=0;k<run;k++) matches.push({r, c:c-1-k}); }
+        run=1;
+      }
+    }
+  }
+  // عمودي
+  for(let c=0;c<COLS;c++){
+    let run=1;
+    for(let r=1;r<=ROWS;r++){
+      const cur = r<ROWS? grid[r][c].color : -1;
+      const prev = grid[r-1][c].color;
+      if(r<ROWS && cur===prev) run++; else {
+        if(run>=3){ for(let k=0;k<run;k++) matches.push({r:r-1-k, c}); }
+        run=1;
+      }
+    }
+  }
+  // إزالة التكرارات
+  const key = p=> p.r+','+p.c;
+  const uniq = [...new Map(matches.map(m=>[key(m),m])).values()];
+  return uniq;
+}
+
+function applyGravity(){
+  let moved=false;
+  for(let c=0;c<COLS;c++){
+    for(let r=ROWS-1;r>=0;r--){
+      if(!grid[r][c]){
+        // ابحث فوق عن أول بلاطة
+        for(let rr=r-1; rr>=0; rr--){
+          if(grid[rr][c]){ grid[r][c]=grid[rr][c]; grid[rr][c]=null; moved=true; break; }
+        }
+        if(!grid[r][c]){ grid[r][c]=newTile(); grid[r][c].bornY = - (ROWS-r)*TILE; moved=true; }
+      }
+    }
+  }
+  return moved;
+}
+
+function explode(cells){
+  // نقاط وتأثير بصري
+  score += cells.length * 10;
+  document.getElementById('score').textContent = score;
+
+  const now = performance.now();
+  for(const cell of cells){
+    const x = OFFSET_X + cell.c*TILE + TILE/2;
+    const y = OFFSET_Y + cell.r*TILE + TILE/2;
+    anims.push({ t: now, d: 400, draw:(time)=>{
+      const p = (time-now)/400; ctx.save();
+      ctx.globalAlpha = 1-p; ctx.beginPath();
+      ctx.arc(x, y, 8+30*p, 0, Math.PI*2); ctx.strokeStyle='#e2e8f0'; ctx.lineWidth=2; ctx.stroke(); ctx.restore();
+    }});
+    grid[cell.r][cell.c] = null;
+  }
+}
+
+function tryMatchAndResolve(a,b){
+  const before = JSON.stringify(grid);
+  swap(a,b);
+  const m = findMatches();
+  if(m.length===0){
+    // لا يوجد تطابق — تراجع
+    swap(a,b);
+    return false;
+  }
+
+  // إنشاء عناصر خاصة بناءً على طول السلسلة
+  // احسب أطوال السلاسل المتأثرة فقط حول a و b
+  createSpecialsFromSwap(a,b);
+
+  cascade();
+  return true;
+}
+
+function countRunFrom(r,c, dr,dc){
+  const color = grid[r][c].color;
+  let run=1, rr=r+dr, cc=c+dc;
+  while(tileAt(rr,cc) && tileAt(rr,cc).color===color){ run++; rr+=dr; cc+=dc; }
+  return run;
+}
+
+function createSpecialsFromSwap(a,b){
+  // إن وُجدت سلسلة 4 => روكيت على البلاطة الأخيرة المتحركة
+  // سلسلة 5 => قنبلة
+  for(const cell of [a,b]){
+    const t = tileAt(cell.r, cell.c); if(!t) continue;
+    const h = countRunFrom(cell.r, cell.c, 0,1) + countRunFrom(cell.r, cell.c, 0,-1) -1;
+    const v = countRunFrom(cell.r, cell.c, 1,0) + countRunFrom(cell.r, cell.c, -1,0) -1;
+    const maxRun = Math.max(h,v);
+    if(maxRun>=5) t.type = TYPE_BOMB; else if(maxRun===4) t.type = TYPE_ROCKET;
+  }
+}
+
+function triggerSpecial(r,c){
+  const t = grid[r][c]; if(!t) return [];
+  const cells=[];
+  if(t.type===TYPE_ROCKET){
+    // امسح الصف أو العمود عشوائيًا
+    if(Math.random()<0.5){ for(let cc=0;cc<COLS;cc++) cells.push({r, c:cc}); }
+    else { for(let rr=0;rr<ROWS;rr++) cells.push({r:rr, c}); }
+  } else if(t.type===TYPE_BOMB){
+    for(let rr=r-1; rr<=r+1; rr++) for(let cc=c-1; cc<=c+1; cc++) if(tileAt(rr,cc)) cells.push({r:rr,c:cc});
+  } else {
+    return [];
+  }
+  return cells;
+}
+
+function cascade(){
+  // حلقة: إزالة مطابقات -> تطبيق الجاذبية -> تكرار
+  let cycles=0;
+  while(cycles++<20){
+    // شغّل القدرات الخاصة أولاً (إن وجدت)
+    let specials=[];
+    for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+      if(grid[r][c] && grid[r][c].type!==TYPE_NORMAL){
+        // فعّلها بعد التطابق مباشرة
+        specials.push(...triggerSpecial(r,c));
+        grid[r][c].type = TYPE_NORMAL; // عودة للوضع العادي بعد التفجير
+      }
+    }
+    if(specials.length){ explode(specials); }
+
+    const matches = findMatches();
+    if(!matches.length && !specials.length) break;
+    if(matches.length) explode(matches);
+
+    // سقوط وملء
+    applyGravity();
+  }
+}
+
+// التعامل مع الإدخال (الفأرة + اللمس)
+function posToCell(px,py){
+  const x = px - OFFSET_X, y = py - OFFSET_Y;
+  const c = Math.floor(x / TILE), r = Math.floor(y / TILE);
+  if(r>=0 && c>=0 && r<ROWS && c<COLS) return {r,c};
+  return null;
+}
+
+let dragStart=null;
+canvas.addEventListener('mousedown', e=>{
+  if(inputLock||moves<=0) return; dragStart = posToCell(e.offsetX, e.offsetY); selected = dragStart; });
+canvas.addEventListener('mousemove', e=>{
+  if(!dragStart) return; selected = posToCell(e.offsetX, e.offsetY) || dragStart; });
+window.addEventListener('mouseup', e=>{
+  if(!dragStart) return; const end = posToCell(e.offsetX, e.offsetY);
+  if(end && areNeighbors(dragStart, end)){
+    if(tryMatchAndResolve(dragStart, end)){
+      moves--; document.getElementById('moves').textContent = moves;
+      if(moves===0) levelUpOrGameOver();
+    }
+  }
+  dragStart=null; selected=null;
+});
+
+// لمس
+canvas.addEventListener('touchstart', e=>{
+  if(inputLock||moves<=0) return; const t = e.touches[0];
+  const rect = canvas.getBoundingClientRect();
+  dragStart = posToCell(t.clientX-rect.left, t.clientY-rect.top); selected=dragStart; e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchmove', e=>{
+  if(!dragStart) return; const t = e.touches[0]; const rect = canvas.getBoundingClientRect();
+  selected = posToCell(t.clientX-rect.left, t.clientY-rect.top) || dragStart; e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchend', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const t = e.changedTouches[0];
+  const end = posToCell(t.clientX-rect.left, t.clientY-rect.top);
+  if(end && areNeighbors(dragStart, end)){
+    if(tryMatchAndResolve(dragStart, end)){
+      moves--; document.getElementById('moves').textContent = moves;
+      if(moves===0) levelUpOrGameOver();
+    }
+  }
+  dragStart=null; selected=null; e.preventDefault();
+},{passive:false});
+
+function levelUpOrGameOver(){
+  // بساطة: لو وصلت 1500 نقطة يرتفع المستوى وتزيد الحركات
+  if(score >= level*1500){
+    level++; moves = 20 + level*2; // منح حركات جديدة
+    document.getElementById('level').textContent = level;
+    document.getElementById('moves').textContent = moves;
+    toast('مستوى جديد!');
+  } else {
+    toast('انتهت الحركات! ابدأ من جديد');
+  }
+}
+
+function toast(msg){
+  const now = performance.now();
+  anims.push({ t: now, d:1800, draw:(time)=>{
+    const p = Math.min(1,(time-now)/300);
+    const y = 560 - (p*20);
+    ctx.save(); ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#111827'; roundRect(80, y, W-160, 40, 12); ctx.fill();
+    ctx.globalAlpha = 1; ctx.fillStyle = '#e2e8f0'; ctx.font='700 16px system-ui';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(msg, W/2, y+20);
+    ctx.restore();
+  }});
+}
+
+// أزرار
+ document.getElementById('newGame').addEventListener('click', ()=>{ score=0; moves=30; level=1; initGrid();
+  document.getElementById('score').textContent=score;
+  document.getElementById('moves').textContent=moves;
+  document.getElementById('level').textContent=level;
+  toast('بدأت لعبة جديدة');
+});
+ document.getElementById('shuffle').addEventListener('click', ()=>{
+   // خلط اللوح مع خصم حركة
+   if(moves<=0) return; moves--; document.getElementById('moves').textContent=moves;
+   grid = grid.flat().sort(()=>Math.random()-0.5).reduce((rows, t, i)=>{
+     const r = Math.floor(i/COLS); (rows[r]=rows[r]||[]).push(t); return rows;
+   }, []);
+   toast('تم الخلط');
+ });
+
+// تشغيل
+initGrid();
+render();
+
+</script></body>
+</html>
